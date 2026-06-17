@@ -1,0 +1,53 @@
+name: Architecture (LikeC4) → Pages
+on:
+  push:
+    branches: [main]
+    paths: ['*/architecture/**', 'site/**', '.github/workflows/likec4-pages.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: likec4/actions@v1
+        with: { export: png, path: pipegen-agent/architecture, output: _site/pipegen-agent/figures }
+      - uses: likec4/actions@v1
+        with: { action: build, path: pipegen-agent/architecture, output: _site/pipegen-agent/explore, base: /accountbot-architecture/pipegen-agent/explore/, use-hash-history: 'true' }
+      - uses: likec4/actions@v1
+        with: { export: png, path: databot-agent/architecture, output: _site/databot-agent/figures }
+      - uses: likec4/actions@v1
+        with: { action: build, path: databot-agent/architecture, output: _site/databot-agent/explore, base: /accountbot-architecture/databot-agent/explore/, use-hash-history: 'true' }
+      - name: Assemble landing pages + hub
+        run: |
+          sudo chown -R "$USER":"$USER" _site
+          for sub in pipegen-agent databot-agent; do
+            npx -y likec4@latest export json "$sub/architecture" -o "$sub.json"
+            node site/build-page.mjs --model "$sub.json" --figures "_site/$sub/figures" --out "_site/$sub/index.html" --repo "$sub" --explore ./explore/ --github https://github.com/sjarmak/accountbot-architecture
+            cp site/styles.css site/favicon.svg "_site/$sub/"
+            cp -r site/fonts "_site/$sub/fonts"
+          done
+          cp site/hub-index.html _site/index.html
+          cp site/styles.css site/favicon.svg _site/
+          cp -r site/fonts _site/fonts
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

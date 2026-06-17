@@ -1,0 +1,81 @@
+// Deployment model — where each piece runs, generalized for public view.
+//
+// The scoring pipeline is an ordinary local / operator process that writes
+// flat files; it reads the internal data plane only through the data-CLI
+// LLM session (it ingests and warehouses nothing). The bot and the publish
+// job run on a managed cloud runtime. No real hostnames, resource ids, or
+// account identifiers appear here.
+
+deployment {
+
+  operatorHost = host 'Operator / CI host' {
+    description 'Where the scoring pipeline and enrichment fan-out run — a local toolchain producing flat-file deliverables'
+
+    pipeProc = proc 'Python runtime — scoring & ranking pipeline' {
+      instanceOf pipegen.pipeline
+    }
+    signalsProc = proc 'Python runtime — signal collection + data CLI' {
+      instanceOf pipegen.signals
+    }
+    enrichProc = proc 'Python + LLM-subagent runtime — account enrichment' {
+      instanceOf pipegen.enrichment
+    }
+    artifacts = proc 'Flat-file artifacts (CSV / xlsx / JSONL)' {
+      description 'Generated, gitignored deliverables; PII-bearing dossiers are gitignored, no-PII briefs are committed'
+    }
+  }
+
+  cloudRuntime = host 'Managed cloud runtime' {
+    description 'Managed container/job platform + scheduler, object storage, and a document store'
+
+    botSvc = proc 'Bot service (managed container)' {
+      instanceOf pipegen.bot
+    }
+    publishJob = proc 'Scheduled publish job' {
+      instanceOf pipegen.publish
+    }
+    readSurface = proc 'Two-tier read surface + object mirror' {
+      description 'Account-grain no-PII tier (wide grant) + restricted contact/activity tier + columnar object mirror'
+    }
+  }
+
+  dataPlaneHost = host 'Internal GTM data plane' {
+    description 'Pre-existing warehouse / BI / analytics / CRM — operated elsewhere, read-only to this project'
+    instanceOf warehouse
+  }
+
+  inferenceHost = host 'Inference / function-calling provider' {
+    description 'Hosts the natural-language-to-query session and the synthesis model'
+    instanceOf inference
+  }
+
+  chatHost = host 'Team chat platform' {
+    instanceOf chat
+  }
+
+  driveHost = host 'Shared file drive' {
+    description 'Reached via a local desktop-sync mount — no API client'
+    instanceOf fileShare
+  }
+
+  // Runtime data & control flow.
+  signalsProc -> inferenceHost 'NL → query (function-calling)'
+  inferenceHost -> dataPlaneHost 'read-only queries'
+  signalsProc -> artifacts 'writes redacted per-account JSONL'
+  pipeProc -> artifacts 'writes ranked CSVs / xlsx'
+  enrichProc -> inferenceHost 'brief + draft synthesis'
+  enrichProc -> driveHost 'mirror approved docs'
+  enrichProc -> chatHost 'approval notification'
+  botSvc -> chatHost 'hosts the app'
+  botSvc -> inferenceHost 'in-bot synthesis'
+  publishJob -> readSurface 'publishes pipeline outputs'
+  publishJob -> artifacts 'reads deliverables'
+}
+
+views {
+
+  deployment view deployment {
+    title 'Deployment — where each piece runs'
+    include *
+  }
+}

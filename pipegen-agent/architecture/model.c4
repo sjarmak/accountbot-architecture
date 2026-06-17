@@ -1,0 +1,308 @@
+// `pipegen-agent` — an enterprise pipeline-generation pipeline.
+//
+// Collects public + internal go-to-market signals, scores accounts on a
+// code-complexity-first scorecard, and ships a tiered outbound action list
+// plus per-account research dossiers for the sales team.
+//
+// PUBLIC view of a private repo: every external system is generalized (no
+// real warehouse/bucket/queue names, no customer names, no credentials).
+// Delivery state is tagged so planned / research work renders distinctly
+// from what is already built (see spec.c4 for the tag legend).
+
+model {
+
+  ae = actor 'Account executive / RevOps' {
+    description 'Consumes the tiered action list and per-account dossiers to run outbound; the human in the activation loop'
+  }
+
+  operator = actor 'Pipeline operator' {
+    description 'Runs the scoring pipeline, reviews/approves enrichment dossiers, and refreshes the manual overlays'
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // External systems — all generalized for public publication.
+  // ───────────────────────────────────────────────────────────────────────
+
+  warehouse = externalSystem 'Internal GTM data plane' {
+    description 'Pre-existing CRM / marketing / product-telemetry data plane (data warehouse, BI semantic layer, product analytics, marketing CRM, revenue-intelligence). Operated elsewhere; this project reads it, never ingests or warehouses it.'
+  }
+
+  inference = externalSystem 'Inference / function-calling provider' {
+    description 'LLM provider that hosts the natural-language-to-query function-calling session behind the data CLI, and the synthesis model behind enrichment/drafting'
+  }
+
+  publicWeb = externalSystem 'Public web sources' {
+    description 'Open-web signal sources: code hosts, applicant-tracking/job-board APIs, engineering blogs, regulatory filings, community boards'
+  }
+
+  abm = externalSystem 'ABM intent platform (manual export)' {
+    description 'Account-based-marketing platform. Used via manual segment-export CSVs (the scored API tier is unavailable) for universe seeding + per-account buying-stage intent'
+  }
+
+  chat = externalSystem 'Team chat platform' {
+    description 'Workspace chat: hosts the interactive account-intelligence bot and receives approval notifications'
+  }
+
+  fileShare = externalSystem 'Shared file drive' {
+    description 'Org-shared document drive (reached via a local desktop-sync mount, not an API) where approved AE-facing dossiers land as documents'
+  }
+
+  cloud = externalSystem 'Managed cloud runtime' {
+    description 'Managed container/job platform + scheduler, object storage, and a document store that host the bot, the publish job, and the data CLI back end'
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The pipegen-agent system.
+  // ───────────────────────────────────────────────────────────────────────
+
+  pipegen = system 'pipegen-agent' {
+    description 'Signal collection → complexity-first scoring → tiered outbound action list, plus per-account enrichment and an interactive account-intelligence bot'
+    link https://github.com/sourcegraph/pipegen-agent 'repository (private)'
+
+    // ── Signal collection ──────────────────────────────────────────────────
+    signals = container 'Signal collection' {
+      description 'Gathers per-account signals from the open web and the internal data plane into per-account JSONL'
+      technology 'Python'
+
+      dataCli = component 'Data CLI (databot)' {
+        #built
+        description 'Thin CLI over a hosted function-calling LLM session with live read access to the internal GTM data plane; turns natural-language questions into warehouse/BI/analytics queries. Replaces a whole ingest/warehouse/transform stack — nothing is warehoused locally.'
+      }
+      databotPulls = component 'Warehouse signal pulls' {
+        #evolving
+        #risk
+        description 'Scheduled scaffolds that ask the data CLI fixed questions and append engagement / product-usage / pipeline-state signals. RISK: scoped to the top-50 universe today, so several engagement signals read zero-by-construction for accounts outside that window (regression-pinned).'
+      }
+      redact = component 'PII redaction at write' {
+        #built
+        description 'Collapses any contact email to <first>@<domain> form before raw responses are persisted — the project never stores raw contact PII in tracked artifacts'
+      }
+      githubSignals = component 'Code-host signals' {
+        #built
+        description 'Resolves the org per domain; counts repos (drives multi-repo strength) and probes secondary code hosts; optional authenticated code-search detects AI-coding-tool config files'
+      }
+      publicExtractors = component 'Public-web extractors' {
+        #built
+        description 'Job-postings (ATS APIs / sitemaps), engineering-blog mentions, regulatory filings, community mentions, and on-prem/hybrid posture — drives the complexity-score components'
+      }
+      abmImport = component 'ABM segment import + intent' {
+        #evolving
+        description 'Loads the manual ABM segment export into a domain-keyed cache; supplies the single largest universe-seeding source and a per-account buying-stage intent signal'
+      }
+      engCount = component 'Engineering-headcount estimator' {
+        #built
+        #risk
+        description 'Stamps an engineering-headcount estimate (NOT total employees) via a per-segment dev:employee ratio + manual overrides. RISK: low-eng-share segments (healthcare/insurance/services) are exactly where total-headcount false positives concentrate; the estimate is the primary gate input.'
+      }
+      overrides = component 'Manual signal overlays' {
+        #built
+        description 'Audit-trail-cited overrides for what extractors miss: M&A-frozen exclusions, public AI-tool rollouts, non-extractable hiring/platform-team signals, narrative-fit demotes. Every entry cites a public source.'
+      }
+    }
+
+    // ── Scoring & ranking pipeline ─────────────────────────────────────────
+    pipeline = container 'Scoring & ranking pipeline' {
+      description 'Pure-Python pipeline: build the candidate universe, gate on complexity, score, and rank. No learned model — a transparent baseline scorecard by design.'
+      technology 'Python'
+
+      universe = component 'Universe build' {
+        #built
+        description 'Three independent seeding sources (curated segment lists + deterministic high-conviction cohorts + ABM-derived expansion) merge, dedup, and customer-filter into the candidate universe; a coverage gate fails the build if a tracked segment lacks volume'
+      }
+      exclusions = component 'Pre-rank exclusions' {
+        #built
+        description 'US-only region filter, foreign-HQ + US-billing demote, and an audit-trailed M&A-frozen list — run before the gate so leaks surface as distinct drop reasons'
+      }
+      gate = component 'Complexity gate' {
+        #built
+        description 'Hard engineering-headcount band filter AND (multi-repo OR platform-team) signal, with a Layer-2 fallback that lets regulated/private-codebase segments pass on weaker corroboration when extractors systematically miss them'
+      }
+      aggregate = component 'Signal aggregator' {
+        #built
+        description 'Joins all public + warehouse signal sources + manual overlays per account into a unified signal record (the dbt-replacement, in plain Python)'
+      }
+      scorer = component 'v2 scorer (Strategy B)' {
+        #built
+        description 'Full-denominator 7-component weighted average × segment prior × LTV multiplier. Absent signals contribute 0 and never lift the denominator, so no single populated signal can saturate the score — evidence must accumulate across components.'
+      }
+      customerGuard = component 'Customer-leak defenses' {
+        #built
+        #risk
+        description 'Keeps the outbound queue net-new only: strict-won registry + curated alias expansion + a same-domain hard-signal corpus walk + a closed-won floor. RISK: dual-record / parent-subsidiary leaks are the recurring failure mode each defense patches — the surface is structurally fragile.'
+      }
+    }
+
+    // ── Deliverables ───────────────────────────────────────────────────────
+    deliverables = container 'Deliverables' {
+      description 'The artifacts handed to the sales team — three parallel ranked views over the same scored universe'
+      technology 'Python (CSV / xlsx / Markdown writers)'
+
+      actionList = component 'Q2 action-list workbook' {
+        #built
+        description 'Tier-classifies the ranked list, applies narrative-fit demote/exclude, and writes a multi-tab workbook + tier CSVs + a coordinate-with-AE sheet (sub-status enum) + an excluded-with-reasons sheet'
+      }
+      priorityQueue = component 'Priority queue' {
+        #built
+        description 'A layered, idempotent boost stack on top of the Strategy-B evidence base (customer-drop, revival-motion tag, segment corrections, code-host boost, dev-density penalty, intent boost, tech-forward softpenalty, eligibility tag) → an in-band US call list'
+      }
+      topFamilies = component '4-family scored spreadsheet' {
+        #built
+        description 'Narrative-justified view: a Firmographic / Technical / Intent / Engagement weighted scorer with per-row sub-signal breakdown and a suggested-angle column'
+      }
+      csvSafety = component 'CSV-injection guard' {
+        #built
+        description 'Neutralizes formula-trigger characters at every CSV write so spreadsheet output is safe to open'
+      }
+    }
+
+    // ── Account enrichment ─────────────────────────────────────────────────
+    enrichment = container 'Account enrichment' {
+      description 'Per-account research, persona briefs, and outreach drafts for prioritized accounts, behind a human-review gate. PII-bearing artifacts stay gitignored.'
+      technology 'Python orchestration + LLM subagents'
+
+      dispatcher = component 'Enrichment dispatcher' {
+        #built
+        description 'Reads the priority list and fans out four specialist subagents per account; a soft guard keeps fan-out inside the initial batch window unless forced'
+      }
+      contactDiscoverer = component 'Contact discoverer' {
+        #built
+        description 'Pulls contacts + recent activity via the data CLI; writes the gitignored contacts file (PII)'
+      }
+      accountEnricher = component 'Account enricher' {
+        #built
+        description 'Synthesizes a research brief + evidence from data-plane state and local signal sources; committed, no PII'
+      }
+      personaResearcher = component 'Persona researcher' {
+        #built
+        description 'Per-contact persona briefs from tenure + deep-search; gitignored (PII)'
+      }
+      draftWriter = component 'Draft writer' {
+        #built
+        description 'Writes outreach drafts + a marketing brief under a hard citation rule (a floor of cited evidence per email, or it refuses to ship)'
+      }
+      approve = component 'Approval + distribution' {
+        #built
+        description 'Human-review gate: on approval, converts dossiers to documents, mirrors them into the shared drive via the desktop-sync mount, and posts a fail-soft chat notification. Citation tags are stripped from AE-facing copies.'
+      }
+    }
+
+    // ── Interactive bot ────────────────────────────────────────────────────
+    bot = container 'Account-intelligence bot' {
+      description 'Chat-platform app that answers AE account questions, gated by AE-to-account ownership; dual-mode (local files in dev, managed cloud services in production)'
+      technology 'Python (chat app framework)'
+
+      dispatch = component 'Tool dispatcher' {
+        #built
+        description 'Routes a user question to the right tool: corpus search, the data CLI, an LLM drafter, asset serving, or campaign briefs'
+      }
+      identity = component 'Identity + ownership gate' {
+        #built
+        description 'Resolves chat user → AE and scopes every answer to that AE’s owned accounts'
+      }
+      threadState = component 'Conversation state' {
+        #built
+        description 'Per-thread history (local JSON in dev, a document store in production)'
+      }
+      drafter = component 'LLM drafter' {
+        #built
+        description 'In-bot synthesis loop over the account corpus via the inference provider'
+      }
+    }
+
+    // ── Publish job ────────────────────────────────────────────────────────
+    publish = container 'Publish job' {
+      description 'Scheduled job that mirrors pipeline outputs into a two-tier read surface for org-wide consumption'
+      technology 'Python (containerized scheduled job)'
+
+      publishWriter = component 'Two-tier publisher' {
+        #built
+        description 'Writes an account-grain, no-PII tier (wide reader grant) and a restricted contact/activity tier, plus a columnar object-storage mirror'
+      }
+    }
+
+    // ── Deferred / research ────────────────────────────────────────────────
+    learnedRanker = container 'Learned ranker' {
+      #research
+      description 'PHASE 2: replace the transparent scorecard with a learning-to-rank model once ~6 months of labeled outcomes exist; recency-weighted on the observed won-customer cohort drift'
+    }
+    extractorsV2 = container 'Extractor upgrades' {
+      #planned
+      description 'PLANNED: real AI-tool-adoption + broader careers-page extractors and an M&A monitor to replace today’s manual override tables'
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Relationships.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Signal collection
+  pipegen.signals.dataCli -> inference 'natural-language → query (function-calling)'
+  pipegen.signals.dataCli -> warehouse 'read-only queries via the provider session'
+  pipegen.signals.databotPulls -> pipegen.signals.dataCli 'fixed-question pulls'
+  pipegen.signals.databotPulls -> pipegen.signals.redact 'redact before persisting'
+  pipegen.signals.githubSignals -> publicWeb 'org / repo / code-host probes'
+  pipegen.signals.publicExtractors -> publicWeb 'jobs / blogs / filings / community'
+  pipegen.signals.abmImport -> abm 'manual segment export'
+
+  // Scoring pipeline
+  pipegen.signals.abmImport -> pipegen.pipeline.universe 'largest seeding source + intent'
+  pipegen.signals.engCount -> pipegen.pipeline.universe 'stamps eng-headcount band'
+  pipegen.pipeline.universe -> pipegen.pipeline.exclusions 'candidate universe'
+  pipegen.pipeline.exclusions -> pipegen.pipeline.gate 'surviving rows'
+  pipegen.pipeline.gate -> pipegen.pipeline.aggregate 'gated candidates'
+  pipegen.signals.databotPulls -> pipegen.pipeline.aggregate 'warehouse signals'
+  pipegen.signals.publicExtractors -> pipegen.pipeline.aggregate 'public signals'
+  pipegen.signals.githubSignals -> pipegen.pipeline.aggregate 'code-host signals'
+  pipegen.signals.overrides -> pipegen.pipeline.aggregate 'manual overlays'
+  pipegen.pipeline.aggregate -> pipegen.pipeline.scorer 'unified signal record'
+  pipegen.pipeline.scorer -> pipegen.pipeline.customerGuard 'ranked candidates'
+  pipegen.signals.abmImport -> pipegen.pipeline.customerGuard 'buying-stage intent'
+
+  // Deliverables
+  pipegen.pipeline.customerGuard -> pipegen.deliverables.actionList 'net-new ranked list'
+  pipegen.pipeline.customerGuard -> pipegen.deliverables.priorityQueue 'evidence base'
+  pipegen.pipeline.customerGuard -> pipegen.deliverables.topFamilies 'scored universe'
+  pipegen.deliverables.actionList -> pipegen.deliverables.csvSafety 'safe CSV write'
+  pipegen.deliverables.priorityQueue -> pipegen.deliverables.csvSafety 'safe CSV write'
+  pipegen.deliverables.topFamilies -> pipegen.deliverables.csvSafety 'safe CSV write'
+  ae -> pipegen.deliverables.actionList 'works the tiered list'
+
+  // Enrichment
+  operator -> pipegen.enrichment.dispatcher 'enrich prioritized accounts'
+  pipegen.deliverables.priorityQueue -> pipegen.enrichment.dispatcher 'priority accounts'
+  pipegen.enrichment.dispatcher -> pipegen.enrichment.contactDiscoverer 'stage 1'
+  pipegen.enrichment.dispatcher -> pipegen.enrichment.accountEnricher 'stage 2'
+  pipegen.enrichment.dispatcher -> pipegen.enrichment.personaResearcher 'stage 3'
+  pipegen.enrichment.dispatcher -> pipegen.enrichment.draftWriter 'stage 4'
+  pipegen.enrichment.contactDiscoverer -> pipegen.signals.dataCli 'contacts + activity'
+  pipegen.enrichment.accountEnricher -> pipegen.signals.dataCli 'pipeline + usage state'
+  pipegen.enrichment.accountEnricher -> inference 'brief synthesis'
+  pipegen.enrichment.draftWriter -> inference 'draft synthesis (cited)'
+  operator -> pipegen.enrichment.approve 'review + approve'
+  pipegen.enrichment.draftWriter -> pipegen.enrichment.approve 'dossier for review'
+  pipegen.enrichment.approve -> fileShare 'mirror approved docs'
+  pipegen.enrichment.approve -> chat 'approval notification'
+  ae -> fileShare 'reads approved dossiers'
+
+  // Bot
+  ae -> pipegen.bot 'account questions in chat'
+  pipegen.bot -> chat 'hosts the app / replies'
+  pipegen.bot.dispatch -> pipegen.bot.identity 'ownership-gate the query'
+  pipegen.bot.dispatch -> pipegen.signals.dataCli 'data questions'
+  pipegen.bot.dispatch -> pipegen.bot.drafter 'synthesis'
+  pipegen.bot.drafter -> inference 'corpus synthesis'
+  pipegen.bot.dispatch -> pipegen.bot.threadState 'read/write history'
+
+  // Publish
+  operator -> pipegen.publish 'scheduled / on-demand'
+  pipegen.deliverables.topFamilies -> pipegen.publish.publishWriter 'published outputs'
+  pipegen.publish.publishWriter -> cloud 'two-tier read surface + object mirror'
+
+  // Deferred / research wiring
+  learnedRanker -> pipegen.pipeline.scorer 'replaces scorecard' {
+    #research
+  }
+  extractorsV2 -> pipegen.signals.overrides 'replaces manual tables' {
+    #planned
+  }
+}

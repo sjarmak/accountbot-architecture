@@ -1,0 +1,173 @@
+// `databot-agent` — a tool-agnostic client layer over an internal data-query
+// service.
+//
+// The repo is intentionally thin: it does NOT host the data backend. It is a
+// single-file Python CLI plus a set of agent assets (a Claude Code subagent,
+// three skills, and a Cowork MCP plugin) that all funnel natural-language data
+// questions to one server-side endpoint. That endpoint runs an LLM
+// function-calling session with read-only access to the company's data sources;
+// the client never talks to those sources directly.
+//
+// Delivery state is tagged so what ships today renders distinctly from what is
+// designed-but-not-stable (see spec.c4 for the legend). This is a PUBLIC view of
+// a PRIVATE repo — sensitive identifiers are generalized.
+
+model {
+
+  employee = actor 'Internal analyst' {
+    description 'Company employee asking a natural-language question about product, CRM, marketing, support, or billing data'
+  }
+
+  hostAgent = actor 'Host coding agent' {
+    description 'Any agent that can shell out — Claude Code, Codex, Amp, or Cowork — that dispatches the question to databot-agent'
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // External systems — the auth path, the inference/data backend, and the
+  // underlying data sources the backend reaches (all generalized).
+  // ─────────────────────────────────────────────────────────────────────────
+
+  identity = externalSystem 'Cloud identity provider' {
+    description 'Issues the short-lived identity token used to call the backend; the CLI resolves it from the local cloud SDK (or an explicit override)'
+  }
+
+  dataService = externalSystem 'Data-query service' {
+    description 'Server-side endpoint (a cloud function) that runs an LLM function-calling session with read-only access to the data sources. Calls execute under the caller\'s identity, so authorization is enforced upstream, not in this repo'
+  }
+
+  inferenceModel = externalSystem 'Inference provider' {
+    description 'The function-calling LLM that plans which data tool to invoke and composes the natural-language answer'
+  }
+  dataWarehouse = datastore 'Analytics data warehouse' {
+    description 'Read-only SELECT analytics store: product telemetry, CRM, billing. Subject to a per-query scan ceiling, so queries must be date-filtered'
+  }
+  bizTools = externalSystem 'Business-data tools' {
+    description 'BI/reporting SDK, product-analytics platform, and marketing CRM/forms API — reached read-only by the backend on the caller\'s behalf'
+  }
+  codeSearch = externalSystem 'Code & deep search' {
+    description 'Searches the company\'s own repositories for metric/table definitions and product-event firing logic'
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // The databot-agent system.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  databot = system 'databot-agent' {
+    description 'Tool-agnostic client layer: one CLI plus agent assets that route data questions to the data-query service and shape the answer'
+    link https://github.com/sourcegraph/databot-agent 'repository (private)'
+
+    // ── The CLI — the single integration point everything else wraps ────────
+    cli = container 'databot CLI' {
+      description 'Single-file Python 3 script (stdlib only). Resolves auth, POSTs the question, and shapes the JSON envelope. Every other surface ultimately calls this'
+      technology 'Python 3 (stdlib)'
+
+      auth = component 'auth resolver' {
+        #built
+        description 'Resolves an identity token by precedence: explicit flag -> env var -> cloud SDK (preferred, always fresh) -> local env file. Fails fast with a clear remediation message if none works'
+      }
+      request = component 'request builder + transport' {
+        #built
+        description 'Builds the request body (question, type, optional history, optional digest-context) and POSTs it; surfaces HTTP/transport errors verbatim instead of swallowing them'
+      }
+      flags = component 'flag & input parsing' {
+        #built
+        description 'Argument parser + stdin fallback: question, --type, --timeout, --history, --digest-context, --raw, --strip-mrkdwn, --token'
+      }
+      history = component 'history loader' {
+        #built
+        description 'Loads and validates prior turns (inline JSON or a file path) for multi-turn follow-up; validates each entry has role + content'
+      }
+      mrkdwn = component 'mrkdwn -> CommonMark' {
+        #built
+        description 'Optional post-processor that converts the Slack-flavored markdown answer to standard CommonMark for embedding in reports'
+      }
+    }
+
+    // ── Claude Code assets — subagent + skills (the opinionated client) ─────
+    claudeAssets = container 'Claude Code assets' {
+      description 'A subagent and three skills, all markdown + YAML frontmatter, loaded on demand by question shape. Encodes the routing, validation, and redaction discipline around the raw CLI'
+      technology 'Markdown / YAML'
+
+      researcher = component 'databot-researcher subagent' {
+        #built
+        description 'Runs the per-question workflow in its own context window: pre-route -> probe -> inspect provenance -> validate -> synthesize a terse, source-cited answer -> return. Keeps the large raw audit trail out of the orchestrator'
+      }
+      cliSkill = component 'databot-cli skill' {
+        #built
+        description 'Always-on CLI reference: auth chain, flags, response shape, multi-turn, root-cause mode, and an error matrix'
+      }
+      glossarySkill = component 'databot-feature-glossary skill' {
+        #built
+        description 'Per-feature / per-domain cheatsheet mapping each product area to its backing tables/events/dashboards, plus the capability boundary and hard query constraints'
+      }
+      patternsSkill = component 'databot-question-patterns skill' {
+        #built
+        description 'Seven well-supported question categories with example phrasings, plus an explicit list of what the bot handles poorly'
+      }
+    }
+
+    // ── Cowork MCP plugin — the same CLI exposed as one MCP tool ────────────
+    coworkPlugin = container 'Cowork MCP plugin' {
+      description 'A stdio MCP server (stdlib Python) that wraps the CLI as a single `databot_query` tool, plus a bundled skill. Lets an MCP host call the backend with no per-session token pasting'
+      technology 'Python 3 (stdlib) / MCP'
+
+      mcpServer = component 'MCP stdio server' {
+        #evolving
+        description 'Minimal JSON-RPC-over-stdio server implementing initialize / tools/list / tools/call for one tool; shells out to the CLI and returns the answer plus a compact audit summary'
+      }
+      mcpTool = component 'databot_query tool' {
+        #evolving
+        description 'Tool schema: question (required) + timeout, history, digest-context, and an include-audit-trail toggle (audit summarized by default since the full trail is large)'
+      }
+      mcpSkill = component 'bundled databot skill' {
+        #evolving
+        description 'Teaches the MCP host when to reach for the tool, the backend\'s hard constraints, and how to read the audit summary'
+      }
+    }
+
+    // ── Cross-cutting policy carried by every client surface ────────────────
+    redaction = component 'PII redaction guardrail' {
+      #evolving
+      #risk
+      description 'Client-side default: redact personal emails to <first>@<domain>, drop phone numbers, strip social URLs to company name. RISK: the backend returns PII without push-back, so this guardrail is convention enforced in the agent prompt, not a hard gate — externally-shared output must be checked'
+    }
+
+    queryConstraints = component 'query-safety constraints' {
+      #built
+      #risk
+      description 'Read-only-SELECT discipline, per-query scan-ceiling date filters, identity != email join rule, and known-quirk guards. RISK: these are prompt-level conventions the client states inline, not enforced by this repo — the real ceiling and access control live in the backend'
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Relationships.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Actors enter through one of the client surfaces.
+  employee -> databot.cli 'asks a data question (direct terminal use)'
+  hostAgent -> databot.claudeAssets 'dispatches a self-contained question'
+  hostAgent -> databot.coworkPlugin 'calls databot_query (MCP host)'
+
+  // Claude assets and the plugin both ultimately run the CLI.
+  databot.claudeAssets.researcher -> databot.cli 'invokes the CLI per probe'
+  databot.coworkPlugin.mcpServer -> databot.cli 'shells out to the CLI'
+
+  // CLI internals.
+  databot.cli.flags -> databot.cli.request 'parsed args + question'
+  databot.cli.history -> databot.cli.request 'validated prior turns'
+  databot.cli.auth -> identity 'resolves identity token'
+  databot.cli.request -> dataService 'POST question (Bearer identity token)'
+  databot.cli.request -> databot.cli.mrkdwn 'optional: normalize the answer'
+
+  // The backend fans out to the inference model and the data sources (upstream,
+  // generalized — not part of this repo).
+  dataService -> inferenceModel 'function-calling session'
+  dataService -> dataWarehouse 'read-only SELECT (scan-ceiling bounded)'
+  dataService -> bizTools 'read-only API/SDK calls'
+  dataService -> codeSearch 'definition / event lookups'
+
+  // Policy applies across the client surfaces.
+  databot.claudeAssets.researcher -> databot.redaction 'applies before returning'
+  databot.claudeAssets.researcher -> databot.queryConstraints 'frames every probe'
+  databot.coworkPlugin.mcpSkill -> databot.queryConstraints 'states constraints to the host'
+}

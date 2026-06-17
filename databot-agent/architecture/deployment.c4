@@ -1,0 +1,71 @@
+// Deployment model — where each piece runs.
+//
+// Everything in this repo runs locally on the caller's own machine: a Python
+// CLI, an MCP stdio server, and markdown agent assets read in-process by the
+// host agent. The only network hop is a single HTTPS POST to a server-side
+// data-query service, which itself fans out to the inference provider and the
+// data sources (all upstream, generalized). Authorization is enforced upstream
+// under the caller's own identity — this repo holds no credentials.
+
+deployment {
+
+  localHost = host 'Caller workstation' {
+    description 'The analyst\'s or agent host\'s own machine — the only place this repo\'s code runs'
+
+    hostAgentProc = proc 'Host agent process' {
+      description 'Claude Code / Codex / Amp / Cowork — loads the markdown assets in-process and shells out or calls the MCP tool'
+      instanceOf databot.claudeAssets
+    }
+    cliProc = proc 'databot CLI process' {
+      description 'Single-file Python 3 script (stdlib only); spawned per question'
+      instanceOf databot.cli
+    }
+    mcpProc = proc 'MCP stdio server process' {
+      description 'Long-lived stdlib-Python stdio server; shells out to the CLI per tool call'
+      instanceOf databot.coworkPlugin
+    }
+    localSdk = proc 'Local cloud SDK / identity cache' {
+      description 'Provides the short-lived identity token the CLI sends; refreshed by the SDK, never stored in this repo'
+    }
+  }
+
+  serviceHost = host 'Data-query service (server-side)' {
+    description 'A cloud function, outside this repo. Runs the function-calling session and reaches the data sources read-only under the caller\'s identity'
+    instanceOf dataService
+  }
+
+  inferenceHost = host 'Inference provider' {
+    description 'Hosts the function-calling LLM that plans tool use and composes the answer'
+    instanceOf inferenceModel
+  }
+
+  dataHost = host 'Data sources' {
+    description 'Analytics warehouse, business-data tools, and code search — all read-only to the service'
+    instanceOf dataWarehouse
+    instanceOf bizTools
+    instanceOf codeSearch
+  }
+
+  identityHost = host 'Cloud identity provider' {
+    description 'Issues the short-lived identity token'
+    instanceOf identity
+  }
+
+  // Runtime data & control flow.
+  hostAgentProc -> cliProc 'spawns per probe'
+  hostAgentProc -> mcpProc 'tools/call (stdio)'
+  mcpProc -> cliProc 'shells out per call'
+  cliProc -> localSdk 'reads identity token'
+  localSdk -> identityHost 'refreshes token'
+  cliProc -> serviceHost 'HTTPS POST question (Bearer token)'
+  serviceHost -> inferenceHost 'function-calling session'
+  serviceHost -> dataHost 'read-only queries under caller identity'
+}
+
+views {
+
+  deployment view deployment {
+    title 'Deployment — where each piece runs'
+    include *
+  }
+}

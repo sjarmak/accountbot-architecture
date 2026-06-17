@@ -1,0 +1,132 @@
+// Views over the databot-agent model. #planned / #research elements (none yet
+// at element level here) would render dimmed + dashed; #evolving renders solid
+// amber so the moving surfaces are visible at a glance.
+
+views {
+
+  // Landscape — the whole system in context of its actors and the backend.
+  view index {
+    title 'databot-agent — system landscape'
+    include *
+
+    style * {
+      opacity 25%
+    }
+    style element.tag == #built, element.tag == #evolving {
+      opacity 100%
+    }
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      color indigo
+      border dashed
+    }
+  }
+
+  // The databot-agent system, decomposed into its three client surfaces.
+  view databotSystem of databot {
+    title 'databot-agent — client surfaces (CLI, Claude assets, MCP plugin)'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+  }
+
+  // The CLI — the single integration point everything wraps.
+  view cliContainer of databot.cli {
+    title 'databot CLI — internals (auth, transport, parsing)'
+    include *
+  }
+
+  // The Claude Code subagent + skills.
+  view claudeAssetsContainer of databot.claudeAssets {
+    title 'Claude Code assets — subagent + three skills'
+    include *
+  }
+
+  // The Cowork MCP plugin internals.
+  view coworkPluginContainer of databot.coworkPlugin {
+    title 'Cowork MCP plugin — stdio server + tool + skill'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  // Risks & open questions — the elements that carry a #risk flag, with the
+  // open question stated in each box's description.
+  view risks {
+    title 'Risks & open questions'
+    include
+      databot,
+      element.tag == #risk,
+      databot.claudeAssets.researcher,
+      dataService
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #risk {
+      opacity 100%
+      color red
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Walkthrough flows (dynamic views) — the narrative spine of a review.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Flow 1 — a direct CLI question, end to end.
+  dynamic view cliFlow {
+    title 'Walkthrough — a direct CLI question end-to-end'
+    description 'The simplest path: an analyst asks a question in a terminal. The CLI resolves identity locally, POSTs once, and prints the JSON envelope (answer + audit trail).'
+
+    employee -> databot.cli.flags 'databot --strip-mrkdwn "<question>"'
+    databot.cli.flags -> databot.cli.auth 'need a token'
+    databot.cli.auth -> identity 'resolve identity token (SDK / env / flag)'
+    databot.cli.request -> dataService 'POST question (Bearer token)'
+    dataService -> inferenceModel 'plan tool calls'
+    dataService -> dataWarehouse 'read-only SELECT (date-filtered)'
+    dataService -> databot.cli.request 'answer + function-call audit trail'
+    databot.cli.request -> databot.cli.mrkdwn 'optional CommonMark normalize'
+    databot.cli.mrkdwn -> employee 'JSON envelope: response + function_calls'
+  }
+
+  // Flow 2 — the subagent's validated, redacted research workflow.
+  dynamic view researcherFlow {
+    title 'Walkthrough — the subagent research workflow'
+    description 'The opinionated path: a host agent dispatches one self-contained question. The subagent pre-routes, probes, checks provenance, validates for known quirks, redacts PII, and returns a terse cited answer — keeping the large raw audit trail out of the orchestrator.'
+
+    hostAgent -> databot.claudeAssets.researcher 'dispatch one self-contained question'
+    databot.claudeAssets.researcher -> databot.claudeAssets.cliSkill 'load CLI reference (always)'
+    databot.claudeAssets.researcher -> databot.claudeAssets.patternsSkill 'match question to a category'
+    databot.claudeAssets.researcher -> databot.claudeAssets.glossarySkill 'resolve ambiguous table/feature'
+    databot.claudeAssets.researcher -> databot.queryConstraints 'frame the probe (date filter, SELECT-only)'
+    databot.claudeAssets.researcher -> databot.cli.request 'run the probe'
+    databot.cli.request -> dataService 'POST question'
+    dataService -> databot.cli.request 'answer + audit trail'
+    databot.claudeAssets.researcher -> databot.redaction 'redact PII before returning'
+    databot.claudeAssets.researcher -> hostAgent 'terse, source-cited answer (no raw trail)'
+  }
+
+  // Flow 3 — the MCP tool path inside an MCP host.
+  dynamic view mcpFlow {
+    title 'Walkthrough — the MCP tool path'
+    description 'The embedded path: an MCP host calls databot_query. The stdio server shells out to the same CLI, summarizes the audit trail by default, and returns the answer inline — no per-session token pasting.'
+
+    hostAgent -> databot.coworkPlugin.mcpTool 'databot_query(question, ...)'
+    databot.coworkPlugin.mcpTool -> databot.coworkPlugin.mcpServer 'tools/call'
+    databot.coworkPlugin.mcpServer -> databot.cli.request 'shell out: databot --raw --strip-mrkdwn'
+    databot.cli.request -> dataService 'POST question'
+    dataService -> databot.cli.request 'answer + audit trail'
+    databot.coworkPlugin.mcpServer -> hostAgent 'answer + compact audit summary'
+  }
+}

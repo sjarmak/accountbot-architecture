@@ -1,0 +1,188 @@
+// Views over the pipegen-agent model. Planned (#planned) and research
+// (#research) elements/relationships are dimmed + dashed so the
+// "what exists vs what is proposed" split is readable at a glance.
+
+views {
+
+  // Landscape — the whole system in context.
+  view index {
+    title 'pipegen-agent — system landscape'
+    include *
+
+    style * {
+      opacity 25%
+    }
+    style element.tag == #built, element.tag == #evolving {
+      opacity 100%
+    }
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      color indigo
+      border dashed
+    }
+  }
+
+  // The pipegen-agent system, decomposed into its containers.
+  view pipegenSystem of pipegen {
+    title 'pipegen-agent — containers (built vs deferred)'
+    include *
+
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      color indigo
+      border dashed
+    }
+  }
+
+  // Signal collection internals.
+  view signalsContainer of pipegen.signals {
+    title 'Signal collection — components'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  // Scoring & ranking pipeline internals.
+  view pipelineContainer of pipegen.pipeline {
+    title 'Scoring & ranking pipeline — components'
+    include *
+  }
+
+  // Deliverables internals.
+  view deliverablesContainer of pipegen.deliverables {
+    title 'Deliverables — the three ranked views'
+    include *
+  }
+
+  // Account-enrichment internals.
+  view enrichmentContainer of pipegen.enrichment {
+    title 'Account enrichment — four-subagent fan-out + review gate'
+    include *
+  }
+
+  // Interactive bot internals.
+  view botContainer of pipegen.bot {
+    title 'Account-intelligence bot — components'
+    include *
+  }
+
+  // Risks & open questions — the elements that carry a #risk flag, with the
+  // open question stated in each box's description.
+  view risks {
+    title 'Risks & open questions'
+    include
+      pipegen,
+      element.tag == #risk,
+      pipegen.signals,
+      pipegen.pipeline
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #risk {
+      opacity 100%
+      color red
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Walkthrough flows (dynamic views) — the narrative spine of the review.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Flow 1 — building the candidate universe and scoring it.
+  dynamic view scoringFlow {
+    title 'Walkthrough — universe → gate → score → rank'
+    description 'The core 5-stage pipeline. Three seeding sources merge, exclusions and the complexity gate fire before scoring, and the Strategy-B scorecard requires evidence to accumulate across components — no single signal can saturate the score.'
+
+    pipegen.signals.abmImport -> pipegen.pipeline.universe 'seed (largest source) + intent'
+    pipegen.signals.engCount -> pipegen.pipeline.universe 'stamp eng-headcount band'
+    pipegen.pipeline.universe -> pipegen.pipeline.exclusions 'candidate universe'
+    pipegen.pipeline.exclusions -> pipegen.pipeline.gate 'US-only / foreign-HQ / M&A-frozen removed'
+    pipegen.pipeline.gate -> pipegen.pipeline.aggregate 'band + complexity (with L2 fallback)'
+    pipegen.signals.publicExtractors -> pipegen.pipeline.aggregate 'public-web signals'
+    pipegen.signals.githubSignals -> pipegen.pipeline.aggregate 'code-host signals'
+    pipegen.signals.overrides -> pipegen.pipeline.aggregate 'manual overlays'
+    pipegen.pipeline.aggregate -> pipegen.pipeline.scorer 'unified signal record'
+    pipegen.pipeline.scorer -> pipegen.pipeline.customerGuard '7-component score × prior × LTV'
+    pipegen.pipeline.customerGuard -> pipegen.deliverables.actionList 'net-new ranked list'
+  }
+
+  // Flow 2 — reading the internal data plane through the data CLI.
+  dynamic view databotFlow {
+    title 'Walkthrough — reading the internal data plane (no warehouse)'
+    description 'The project ingests nothing. A signal pull asks the data CLI a fixed natural-language question; the hosted LLM session generates and runs the query against the existing GTM data plane; contact PII is redacted before any raw response is written.'
+
+    pipegen.signals.databotPulls -> pipegen.signals.dataCli 'fixed-question pull'
+    pipegen.signals.dataCli -> inference 'natural language → query (function-calling)'
+    inference -> warehouse 'read-only query'
+    warehouse -> pipegen.signals.dataCli 'rows'
+    pipegen.signals.dataCli -> pipegen.signals.databotPulls 'response'
+    pipegen.signals.databotPulls -> pipegen.signals.redact 'collapse emails to <first>@<domain>'
+    pipegen.signals.redact -> pipegen.pipeline.aggregate 'redacted per-account JSONL'
+  }
+
+  // Flow 3 — per-account enrichment, behind a human-review gate.
+  dynamic view enrichmentFlow {
+    title 'Walkthrough — account enrichment → review → AE distribution'
+    description 'Four specialist subagents fan out per account under a hard citation rule. PII-bearing artifacts stay gitignored; only the operator-approved, citation-stripped documents are mirrored to the shared drive for AEs.'
+
+    operator -> pipegen.enrichment.dispatcher 'enrich a prioritized account'
+    pipegen.enrichment.dispatcher -> pipegen.enrichment.contactDiscoverer 'stage 1: contacts (PII, gitignored)'
+    pipegen.enrichment.dispatcher -> pipegen.enrichment.accountEnricher 'stage 2: research brief (committed)'
+    pipegen.enrichment.dispatcher -> pipegen.enrichment.personaResearcher 'stage 3: persona briefs (PII)'
+    pipegen.enrichment.dispatcher -> pipegen.enrichment.draftWriter 'stage 4: drafts (cited)'
+    pipegen.enrichment.draftWriter -> pipegen.enrichment.approve 'dossier → needs_review'
+    operator -> pipegen.enrichment.approve 'approve'
+    pipegen.enrichment.approve -> fileShare 'mirror citation-stripped docs'
+    pipegen.enrichment.approve -> chat 'fail-soft notification'
+    ae -> fileShare 'reads the approved dossier'
+  }
+
+  // Flow 4 — the interactive account-intelligence bot.
+  dynamic view botFlow {
+    title 'Walkthrough — AE asks the account-intelligence bot'
+    description 'Every answer is scoped to the AE’s owned accounts. The dispatcher routes to the right tool; data questions go through the same data CLI the pipeline uses.'
+
+    ae -> pipegen.bot.dispatch 'question in chat'
+    pipegen.bot.dispatch -> pipegen.bot.identity 'resolve AE → owned accounts'
+    pipegen.bot.dispatch -> pipegen.signals.dataCli 'data question'
+    pipegen.bot.dispatch -> pipegen.bot.drafter 'synthesis'
+    pipegen.bot.drafter -> inference 'corpus synthesis'
+    pipegen.bot.dispatch -> pipegen.bot.threadState 'persist turn'
+    pipegen.bot.dispatch -> ae 'scoped answer'
+  }
+
+  // Deferred-work lens: the learned ranker + extractor upgrades in context.
+  view planned {
+    title 'Deferred & research work'
+    include
+      pipegen,
+      pipegen.learnedRanker,
+      pipegen.extractorsV2,
+      pipegen.pipeline.scorer,
+      pipegen.signals.overrides,
+      pipegen.deliverables
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #planned {
+      opacity 100%
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      opacity 100%
+      color indigo
+      border dashed
+    }
+  }
+}
